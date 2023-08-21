@@ -2,7 +2,7 @@
 
 
 //
-// The basic principle behind cpu_dispatch(...) to execute the same procedure
+// The principle behind cpu_dispatch(...) is to execute the same procedure
 // multiple times and use threads to your advantage to make that faster. Some
 // languages also call this a parallel-for.
 //
@@ -55,17 +55,16 @@
 // clasically not the case with CPU code, where if you take many games and run
 // them on a 4-core CPU and a 32-core CPU they might perform the same.
 //
+// There's going to be cases where spinning up a bespoke thread (audio, I/O, etc)
+// will be the right thing to do still. But trying to think of this dispatch
+// paradigm first has proven to be very useful for me personally.
+// Compared to other types of heterogeneous multithreading, (bespoke long lived threads,
+// job systems, etc.) this paradigm tends to keep solutions simpler and with less code.
+//
 // Damn, that sounds like I'm really a GPU person. I am though, Sony was right
-// with the PS3, SPUs were ahead of their time :P 
+// with the PS3, SPUs were ahead of their time and they'll come back :D
 //
-// Don't get me wrong, there's going to be cases where spinning up a bespoke
-// thread that does something (audio, I/O, etc) will be the right thing to do.
-// But this days I try to paralelize a problem first and fit it into the mental
-// model of the "dispatch". Having done most types of heterogeneous multithreading,
-// job systems, etc. I can say that this paradigm makes it easier to reason about
-// code, it keeps it way simpler with some nice threaded gains and I'm happy about it.
-//
-//                                      - Ruben Osorio, 21/08/2023
+//                                     - Ruben Osorio, 21/08/2023
 // 
 //
 
