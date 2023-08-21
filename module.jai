@@ -440,22 +440,20 @@ cpu_dispatch_per_thread_internal :: (dispatch_count : int, internal_procedure : 
 #if OS == .WINDOWS
 {
     #import "Windows";
-    Event :: struct
-    {
-        event : HANDLE;
-    }
+    Event :: struct { event : HANDLE; }
     init :: (event : *Event) 
     {
         event.event = CreateEventW(null, 0, 0, null);
         assert(event != null);
     }
     destroy :: (event : *Event) {
-        CloseHandle(event.event);
+        result := CloseHandle(event.event);
+        assert(result != 0);
     }
     signal :: (event : *Event)
     {
         result := SetEvent(event.event);
-        assert(result == .TRUE);
+        assert(result != .FALSE);
     }
     wait_for :: (event : *Event)
     {
@@ -465,13 +463,38 @@ cpu_dispatch_per_thread_internal :: (dispatch_count : int, internal_procedure : 
 
     SetEvent :: (handle : HANDLE) -> BOOL #foreign kernel32;
     kernel32 :: #system_library "kernel32";
-
+}
+else #if OS == .LINUX || OS == .MACOS
+{
+    #assert(false);
     //
-    // @@NOTE: I believe the pthread equivalent of these are:
+    // Here there's a pootential POSIX implementation, but I haven't
+    // tested it yet so I'll leave it commented out for the time being.
     //
-    // - pthread_cond_init
-    // - pthread_cond_destroy
-    // - pthread_cond_wait 
-    // - pthread_cond_signal 
+    // Maybe we prefer semaphores in general for both cases?
     //
+    /*
+    #import "POSIX";
+    Event :: struct { condition : pthread_cond_t; }
+    init :: (event : *Event) 
+    {
+        result := pthread_cond_init(*event.condition, null);
+        assert(result == 0);
+    }
+    destroy :: (event : *Event)
+    {
+        result := pthread_cond_destroy(*event.condition);
+        assert(result == 0);
+    }
+    signal :: (event : *Event)
+    {
+        result := pthread_cond_signal(*event.condition);
+        assert(result == 0);
+    }
+    wait_for :: (event : *Event)
+    {
+        result := pthread_cond_wait(*event.condition);
+        assert(result == 0);
+    }
+    */
 }
