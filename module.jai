@@ -131,6 +131,7 @@ cpu_dispatch_init :: (percentage_of_processors_to_use := 0.8,
                       $on_thread_start                : Code = #code {},
                       $on_thread_end                  : Code = #code {})
 {
+    should_threads_be_running = 0;
     thread_count := max(cast(int)(cast(float32)get_number_of_processors() * percentage_of_processors_to_use), min_threads_to_create);
     per_cpu_dispatch_thread, per_cpu_dispatch_thread_original_memory = NewArray(thread_count, Per_Thread_Data, alignment = CACHE_LINE_SIZE);
     if !base_context_for_threads then base_context_for_threads = *context;
@@ -140,8 +141,6 @@ cpu_dispatch_init :: (percentage_of_processors_to_use := 0.8,
         it.* = .{};
         it._cpu_dispatch_thread_index = xx it_index;
         it.thread.starting_context = base_context_for_threads.*;
-        init(*it.work_available_event);
-        init(*it.work_done_event);
         it.thread.data = cast(*void)it;
         success := thread_init(*it.thread, THREAD_PROCEDURE, temporary_storage_size = cast(s32)temporary_storage_for_threads); 
         assert(success);
@@ -151,18 +150,32 @@ cpu_dispatch_init :: (percentage_of_processors_to_use := 0.8,
 
 cpu_dispatch_deinit :: ()
 {
+    cpu_dispatch_wake_threads_up();
     for * per_cpu_dispatch_thread
     {
         it.should_stop = true;
-        signal(*it.work_available_event);
+        signal_work_available(it);
         while !thread_is_done(*it.thread){}
         thread_deinit(*it.thread);
-        destroy(*it.work_available_event);
-        destroy(*it.work_done_event);
     }
     per_cpu_dispatch_thread.data = null;
     per_cpu_dispatch_thread.count = 0;
     free(per_cpu_dispatch_thread_original_memory);
+}
+
+
+
+cpu_dispatch_wake_threads_up :: ()
+{
+    should_threads_be_running += 1;
+    signal_value_changed(*should_threads_be_running);
+}
+
+cpu_dispatch_send_threads_to_sleep :: ()
+{
+    should_threads_be_running -= 1;
+    signal_value_changed(*should_threads_be_running);
+    #assert(should_threads_be_running >= 0);
 }
 
 
@@ -177,11 +190,15 @@ cpu_dispatch_deinit :: ()
 #import "Thread";
 #import "Atomics";
 #import "System";
+#import "Machine_X64";
 
 
 
 cpu_dispatch_internal :: (dispatch_count : int, $procedure : $Procedure, arguments : *$Arguments, $mode : CPU_Dispatch_Mode, $loc : Source_Code_Location)
 {
+    cpu_dispatch_wake_threads_up();
+    defer cpu_dispatch_send_threads_to_sleep();
+
     #insert #run generate_internal_procedure(Procedure, Arguments, mode, loc);
     #if mode == .CONTIGUOUS_ITEMS
     {
@@ -287,6 +304,7 @@ generate_internal_procedure :: (Procedure_Type : Type, Arguments_Type : Type, mo
 
 
 
+should_threads_be_running : s32 = 0;
 per_cpu_dispatch_thread : []Per_Thread_Data;
 per_cpu_dispatch_thread_original_memory : *void;
 CACHE_LINE_SIZE :: 64;
@@ -296,8 +314,7 @@ Per_Thread_Data :: struct
     {
         _cpu_dispatch_thread_index : s32;
         thread : Thread;
-        work_available_event : Event;
-        work_done_event      : Event;
+        work_flag : s32 = 0;
         should_stop := false;
 
         first_dispatch_index := 0;
@@ -320,11 +337,11 @@ thread_procedure :: (_thread : *Thread, $on_thread_start : Code, $on_thread_end 
     #insert on_thread_start;
     while !should_stop
     {
-        wait_for(*work_available_event);
+        wait_for_work_to_do(per_thread_data);
         if should_stop then break;
         for first_dispatch_index..last_dispatch_index
             user_procedure(it, user_data);
-        signal(*work_done_event);
+        signal_work_done(per_thread_data);
     }
     #insert on_thread_end;
     return 0;
@@ -362,12 +379,12 @@ cpu_dispatch_distributed_internal :: (dispatch_count : int, internal_procedure :
                 it.last_dispatch_index  = current_first_dispatch_index + count_for_this_thread - 1;
                 it.user_procedure = internal_procedure;
                 it.user_data      = procedure_arguments;
-                signal(*it.work_available_event);
+                signal_work_available(it);
                 current_first_dispatch_index += count_for_this_thread;
             }
             else
             {
-                signal(*it.work_done_event);
+                signal_work_done(it);
             }
         }
 
@@ -392,7 +409,7 @@ cpu_dispatch_distributed_internal :: (dispatch_count : int, internal_procedure :
         // Wait for all threads to finish then return.
         for * per_cpu_dispatch_thread
         {
-            wait_for(*it.work_done_event);
+            wait_for_work_done(it);
         }
     }
 }
@@ -418,7 +435,7 @@ cpu_dispatch_per_thread_internal :: (dispatch_count : int, internal_procedure : 
             it.last_dispatch_index  = dispatch_count - 1;
             it.user_procedure = internal_procedure;
             it.user_data      = procedure_arguments;
-            signal(*it.work_available_event);
+            signal_work_available(it);
         }
 
         // Tell the main thread to do its part as well
@@ -430,9 +447,114 @@ cpu_dispatch_per_thread_internal :: (dispatch_count : int, internal_procedure : 
         // Wait for all threads to finish then return.
         for * per_cpu_dispatch_thread
         {
-            wait_for(*it.work_done_event);
+            wait_for_work_done(it);
         }
     }
+}
+
+
+
+signal_work_available :: (using per_thread_data : *Per_Thread_Data)
+{
+    work_flag_pointer := *work_flag;
+
+    // Set the flag to 1 and make sure it was 0
+    flag : s32 = 1;
+    #asm { lock_xchg.d flag, [work_flag_pointer]; }
+    assert(flag == 0);
+}
+
+wait_for_work_to_do :: (using per_thread_data : *Per_Thread_Data)
+{
+    work_flag_pointer := *work_flag;
+
+    while true
+    {
+        // We first spin when waiting for work to be available. We do this
+        // first because if the user does multiple calls to cpu_dispatch(...)
+        // in a row, we might be fast enough that we catch a second call
+        // immediately after the first one. Meaning that we don't even bother
+        // yielding, or going to sleep, or whatever we want to do once we
+        // spin enough.
+        //
+        // We'll wait here for 65536 cycles, which in a 5GHz processor should
+        // be (65536/5e9)=13.1072 microseconds. So if the user manages to call
+        // cpu_dispatch(...) twice in that amount of time, we'll catch it on
+        // this first spin loop and we avoid big context switches.
+        //
+        SPIN_CYCLES :: 65536;
+        spin_start := rdtsc();
+        while true
+        {
+            // Loop here until flag is 1, note that the flag could either
+            // be 0 (no work) or 2 (work finished), because after work is done
+            // we could be waiting for more work before someone else has seen
+            // that the work was done and has reset the flag
+            flag : s32 = 0;
+            #asm { mov.d flag, [work_flag_pointer]; }
+            if flag == 1 then return;
+
+            // Hint that we're on a spin-wait loop
+            #asm { pause; }
+
+            // Spin here for a few cycles before we yield
+            if (rdtsc() - spin_start) < SPIN_CYCLES then break;
+        }
+
+        // If we have spun for enough cycles, we tell the OS it's fine to
+        // switch us so someone else goes to do some work
+        yield_to_another_thread();
+
+        // If the value is zero, it means that the main thread is wanting us to
+        // suspend execution until it becomes non-zero again. We do the check first
+        // ourselves to avoid the potentially more expensive comparison on whatever
+        // OS call this would go to.
+        if should_threads_be_running == 0 then wait_while_value_matches(*should_threads_be_running, 0);
+    }
+}
+
+signal_work_done :: (using per_thread_data : *Per_Thread_Data)
+{
+    work_flag_pointer := *work_flag;
+
+    // Set the flag to 2, it could have been 0 or 1 because
+    // sometimes we go from no-work to signal that it's done to
+    // mean that worker thread had nothing to do so it's "done"
+    flag : s32 = 2;
+    #asm { lock_xchg.d flag, [work_flag_pointer]; }
+    assert(flag == 0 || flag == 1);
+}
+
+wait_for_work_done :: (using per_thread_data : *Per_Thread_Data)
+{
+    work_flag_pointer := *work_flag;
+
+    // Here we just spin while waiting without much concern
+    // since this will be on the main thread and we don't want
+    // context switching anyway. Plus we're expecting the loads
+    // to be balanced, meaning that all threads, including the
+    // main one, should finish roughly at the same time, so we
+    // expect to be waiting very little
+    while true
+    {
+        // Loop here until flag is 2
+        flag : s32 = 0;
+        #asm { mov.d flag, [work_flag_pointer]; }
+        if flag == 2 then break;
+
+        // 1 is the only allowed value here, because 0 would mean that
+        // there's no work to be done, so we haven't signaled it and we
+        // would be waiting for ever cause nobody will ever change the value
+        assert(flag == 1);
+
+        // Hint that we're on a spin-wait loop
+        #asm { pause; }
+    }
+
+    // Set the flag to 0 and make sure it was 2
+    flag : s32 = 0;
+    #asm { lock_xchg.d flag, [work_flag_pointer]; }
+    assert(flag == 2);
 }
 
 
@@ -440,61 +562,39 @@ cpu_dispatch_per_thread_internal :: (dispatch_count : int, internal_procedure : 
 #if OS == .WINDOWS
 {
     #import "Windows";
-    Event :: struct { event : HANDLE; }
-    init :: (event : *Event) 
+    yield_to_another_thread :: () { SwitchToThread(); }
+    wait_while_value_matches :: (target : *s32, value : s32)
     {
-        event.event = CreateEventW(null, 0, 0, null);
-        assert(event != null);
+        result := WaitOnAddress(target, *value, size_of(type_of(value)), INFINITE);
+        assert(result == .TRUE);
     }
-    destroy :: (event : *Event) {
-        result := CloseHandle(event.event);
-        assert(result != 0);
-    }
-    signal :: (event : *Event)
+    signal_value_changed :: (target : *s32)
     {
-        result := SetEvent(event.event);
-        assert(result != .FALSE);
-    }
-    wait_for :: (event : *Event)
-    {
-        result := WaitForSingleObject(event.event, WIN_TIMEOUT_INFINITE);
-        assert(result != WAIT_FAILED);
+        WakeByAddressAll(target);
     }
 
-    SetEvent :: (handle : HANDLE) -> BOOL #foreign kernel32;
     kernel32 :: #system_library "kernel32";
+    synchronization :: #system_library,no_dll "synchronization";
+    SwitchToThread :: () -> BOOL #foreign kernel32;
+    WaitOnAddress :: (Address : *void, CompareAddress : *void, AddressSize : SIZE_T, dwMilliseconds : DWORD) -> BOOL #foreign synchronization;
+    WakeByAddressAll :: (Address : *void) #foreign synchronization;
 }
 else #if OS == .LINUX || OS == .MACOS
 {
     #assert(false);
-    //
-    // Here there's a pootential POSIX implementation, but I haven't
-    // tested it yet so I'll leave it commented out for the time being.
-    //
-    // Maybe we prefer semaphores in general for both cases?
-    //
     /*
     #import "POSIX";
-    Event :: struct { condition : pthread_cond_t; }
-    init :: (event : *Event) 
+    yield_to_another_thread :: () { pthread_yield_np(); }
+    wait_while_value_matches :: (target : *s32, value : s32)
     {
-        result := pthread_cond_init(*event.condition, null);
-        assert(result == 0);
+        // @@TODO: Maybe using futex?
     }
-    destroy :: (event : *Event)
+    signal_value_changed :: (target : *s32)
     {
-        result := pthread_cond_destroy(*event.condition);
-        assert(result == 0);
-    }
-    signal :: (event : *Event)
-    {
-        result := pthread_cond_signal(*event.condition);
-        assert(result == 0);
-    }
-    wait_for :: (event : *Event)
-    {
-        result := pthread_cond_wait(*event.condition);
-        assert(result == 0);
+        // @@TODO: Maybe using futex?
     }
     */
 }
+
+
+

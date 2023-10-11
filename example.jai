@@ -3,6 +3,7 @@
 #import "Math";
 #import "Atomics";
 #import "Hash";
+#import "Machine_X64";
 #import,dir "../osor_cpu_dispatch";
 
 
@@ -16,6 +17,7 @@ main :: ()
     dispatch_once_per_thread();
     continuous_items_mode();
     load_balancing_mode();
+    dispatch_latency();
 }
 
 
@@ -66,8 +68,14 @@ continuous_items_mode :: ()
 {
     print_example_name("Continuous Items Mode");
 
-    data : [200]u64; 
+    ELEMENT_COUNT :: 8 * 1024 * 1024;
+    data := NewArray(ELEMENT_COUNT, u64, initialized = false);
+    defer free(data.data);
     for * data it.* = random_get();
+
+    print("We're going to process %MB of memory in % byte elements\n\n",
+          (data.count * size_of(type_of(data[0]))) / (1024 * 1024),
+          size_of(type_of(data[0])));
 
     //
     // Here we have a procedure that's going to be reading and writing an element
@@ -82,7 +90,7 @@ continuous_items_mode :: ()
     cache_friendly_load :: (data : []u64)
     {
         store_work_item_duration();
-        for 0..100 data[context.dispatch_index] = fnv1a_hash(xx data[context.dispatch_index]);
+        data[context.dispatch_index] = fnv1a_hash(xx data[context.dispatch_index]);
     }
 
     //
@@ -90,7 +98,7 @@ continuous_items_mode :: ()
     // up the dispatch faster, because we're much more cache-access friendly
     // 
     before := current_time_monotonic();
-    cpu_dispatch(200, cache_friendly_load, cast([]u64)data, mode = .CONTIGUOUS_ITEMS);
+    cpu_dispatch(ELEMENT_COUNT, cache_friendly_load, data, mode = .CONTIGUOUS_ITEMS);
     contiguous_items_time := to_float64_seconds(current_time_monotonic() - before) * 1000.0;
     print("With CONTIGUOUS_ITEMS it took %ms\n", contiguous_items_time);
     print_durations_per_thread();
@@ -101,7 +109,7 @@ continuous_items_mode :: ()
     // slower due to all the random cache access and false sharing issues we hit.
     //
     before = current_time_monotonic();
-    cpu_dispatch(200, cache_friendly_load, cast([]u64)data, mode = .LOAD_BALANCING);
+    cpu_dispatch(ELEMENT_COUNT, cache_friendly_load, data, mode = .LOAD_BALANCING);
     load_balancing_time := to_float64_seconds(current_time_monotonic() - before) * 1000.0;
     print("With LOAD_BALANCING it took %ms\n", to_float64_seconds(current_time_monotonic() - before) * 1000.0);
     print_durations_per_thread();
@@ -191,6 +199,65 @@ load_balancing_mode :: ()
 
 
 
+dispatch_latency :: ()
+{
+    print_example_name("Testing Dispatch Latency");
+
+    //
+    // Let's see how many cycles it takes since we call cpu_dispatch(...)
+    // until the first and last workers pick up the work they need to do
+    // and start processing the items.
+    //
+    test_latency :: ()
+    {
+        first : u64 = 0xFFFF_FFFF_FFFF_FFFF;
+        last  : u64 = 0;
+        before := rdtsc();
+        work :: (first : *u64, last : *u64)
+        {
+            if context.thread_index != 0
+            {
+                counter := rdtsc();
+                atomic_min(first, counter);
+                atomic_max(last, counter);
+            }
+        }
+        cpu_dispatch(1, work, *first, *last, mode = .PER_THREAD); 
+        print("First worker started % cycles after dispatch, the last one % cycles\n", first-before, last-before);
+    }
+
+    //
+    // This first path is the default behaviour, where the threads are internally
+    // sleeping so we don't burn cycles and power (those poor batteries!)
+    // waiting for work to be available.
+    //
+    // When we do a dispatch, the threads will wake up and start doing the
+    // work, but this means that the OS needs to switch contexts and start
+    // running our threads, which can get fairly slow.
+    //
+    print("Latency when having to wake up threads in place:\n");
+    for 0..15 test_latency();
+    print("\n");
+
+    //
+    // However, we can optimize this case by waking the threads up in advance
+    // when we know we're about to do a dispatch, this means that we give the OS
+    // time to move our threads into the cores and start running them and when
+    // we actually reach the dispatch calls, the threads are already running, spinning
+    // and burning cycles asking "where's the work? where's the work? WHERE IS THE WORK?"
+    //
+    // During the time in between waking the threads up and sending them to sleep
+    // they will hog a lot of cpu time, and this is why this is not the default behaviour.
+    //
+    print("Latency when waking up threads in advance:\n");
+    cpu_dispatch_wake_threads_up();
+    for 0..15 test_latency();
+    cpu_dispatch_send_threads_to_sleep();
+    print("\n");
+}
+
+
+
 #scope_file
 
 
@@ -224,14 +291,20 @@ print_durations_per_thread :: (seconds_per_character := 0.01) #expand
         builder : String_Builder;
         defer reset(*builder);
         print_to_builder(*builder, "Thread % (% items): ", formatInt(context.thread_index, minimum_digits = 3), formatInt(context.completed_work_items.count, minimum_digits = 2));
-        for context.completed_work_items
+        items_to_show := min(context.completed_work_items.count, 15);
+        for 0..items_to_show-1
         {
-            character_count := (cast(int)ceil(it.duration / seconds_per_character)) / 2;
+            item := context.completed_work_items[it];
+            character_count := (cast(int)ceil(item.duration / seconds_per_character)) / 2;
             append(*builder, "[");
             for 0..character_count-1 append(*builder, ".");
-            print_to_builder(*builder, "%", formatInt(it.item_index, minimum_digits = 2));
+            print_to_builder(*builder, "%", formatInt(item.item_index, minimum_digits = 2));
             for 0..character_count-1 append(*builder, ".");
             append(*builder, "]");
+        }
+        if items_to_show < context.completed_work_items.count
+        {
+            append(*builder, "...");
         }
         append(*builder, "\n");
         print(builder_to_string(*builder));
@@ -239,6 +312,31 @@ print_durations_per_thread :: (seconds_per_character := 0.01) #expand
     }
     cpu_dispatch(1, print_durations_for_this_thread, seconds_per_character, mode = .PER_THREAD);
     print("\n");
+}
+
+
+
+atomic_min :: (target : *u64, value : u64)
+{
+    previous := target.*;
+    success := false;
+    while true
+    {
+        new := min(previous, value);
+        success, previous = compare_and_swap(target, previous, new);
+        if success then break;
+    }
+}
+atomic_max :: (target : *u64, value : u64)
+{
+    previous := target.*;
+    success := false;
+    while true
+    {
+        new := max(previous, value);
+        success, previous = compare_and_swap(target, previous, new);
+        if success then break;
+    }
 }
 
 
