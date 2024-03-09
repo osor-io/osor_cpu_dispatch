@@ -71,16 +71,97 @@
 
 
 #add_context dispatch_index : s64 = -1;
-cpu_dispatch :: (dispatch_count : int, $procedure : $P,                                                                         $mode : CPU_Dispatch_Mode = .CONTIGUOUS_ITEMS, $loc := #caller_location) { arguments : struct {}                                                       = .{};                           cpu_dispatch_internal(dispatch_count, procedure, *arguments, mode, loc); }
-cpu_dispatch :: (dispatch_count : int, $procedure : $P, a0:$A0,                                                                 $mode : CPU_Dispatch_Mode = .CONTIGUOUS_ITEMS, $loc := #caller_location) { arguments : struct {a0:A0;}                                                 = .{a0};                         cpu_dispatch_internal(dispatch_count, procedure, *arguments, mode, loc); }
-cpu_dispatch :: (dispatch_count : int, $procedure : $P, a0:$A0, a1:$A1,                                                         $mode : CPU_Dispatch_Mode = .CONTIGUOUS_ITEMS, $loc := #caller_location) { arguments : struct {a0:A0;a1:A1;}                                           = .{a0,a1};                      cpu_dispatch_internal(dispatch_count, procedure, *arguments, mode, loc); }
-cpu_dispatch :: (dispatch_count : int, $procedure : $P, a0:$A0, a1:$A1, a2:$A2,                                                 $mode : CPU_Dispatch_Mode = .CONTIGUOUS_ITEMS, $loc := #caller_location) { arguments : struct {a0:A0;a1:A1;a2:A2;}                                     = .{a0,a1,a2};                   cpu_dispatch_internal(dispatch_count, procedure, *arguments, mode, loc); }
-cpu_dispatch :: (dispatch_count : int, $procedure : $P, a0:$A0, a1:$A1, a2:$A2, a3:$A3,                                         $mode : CPU_Dispatch_Mode = .CONTIGUOUS_ITEMS, $loc := #caller_location) { arguments : struct {a0:A0;a1:A1;a2:A2;a3:A3;}                               = .{a0,a1,a2,a3};                cpu_dispatch_internal(dispatch_count, procedure, *arguments, mode, loc); }
-cpu_dispatch :: (dispatch_count : int, $procedure : $P, a0:$A0, a1:$A1, a2:$A2, a3:$A3, a4:$A4,                                 $mode : CPU_Dispatch_Mode = .CONTIGUOUS_ITEMS, $loc := #caller_location) { arguments : struct {a0:A0;a1:A1;a2:A2;a3:A3;a4:A4;}                         = .{a0,a1,a2,a3,a4};             cpu_dispatch_internal(dispatch_count, procedure, *arguments, mode, loc); }
-cpu_dispatch :: (dispatch_count : int, $procedure : $P, a0:$A0, a1:$A1, a2:$A2, a3:$A3, a4:$A4, a5:$A5,                         $mode : CPU_Dispatch_Mode = .CONTIGUOUS_ITEMS, $loc := #caller_location) { arguments : struct {a0:A0;a1:A1;a2:A2;a3:A3;a4:A4;a5:A5;}                   = .{a0,a1,a2,a3,a4,a5};          cpu_dispatch_internal(dispatch_count, procedure, *arguments, mode, loc); }
-cpu_dispatch :: (dispatch_count : int, $procedure : $P, a0:$A0, a1:$A1, a2:$A2, a3:$A3, a4:$A4, a5:$A5, a6:$A6,                 $mode : CPU_Dispatch_Mode = .CONTIGUOUS_ITEMS, $loc := #caller_location) { arguments : struct {a0:A0;a1:A1;a2:A2;a3:A3;a4:A4;a5:A5;a6:A6;}             = .{a0,a1,a2,a3,a4,a5,a6};       cpu_dispatch_internal(dispatch_count, procedure, *arguments, mode, loc); }
-cpu_dispatch :: (dispatch_count : int, $procedure : $P, a0:$A0, a1:$A1, a2:$A2, a3:$A3, a4:$A4, a5:$A5, a6:$A6, a7:$A7,         $mode : CPU_Dispatch_Mode = .CONTIGUOUS_ITEMS, $loc := #caller_location) { arguments : struct {a0:A0;a1:A1;a2:A2;a3:A3;a4:A4;a5:A5;a6:A6;a7:A7;}       = .{a0,a1,a2,a3,a4,a5,a6,a7};    cpu_dispatch_internal(dispatch_count, procedure, *arguments, mode, loc); }
-cpu_dispatch :: (dispatch_count : int, $procedure : $P, a0:$A0, a1:$A1, a2:$A2, a3:$A3, a4:$A4, a5:$A5, a6:$A6, a7:$A7, a8:$A8, $mode : CPU_Dispatch_Mode = .CONTIGUOUS_ITEMS, $loc := #caller_location) { arguments : struct {a0:A0;a1:A1;a2:A2;a3:A3;a4:A4;a5:A5;a6:A6;a7:A7;a8:A8;} = .{a0,a1,a2,a3,a4,a5,a6,a7,a8}; cpu_dispatch_internal(dispatch_count, procedure, *arguments, mode, loc); }
+cpu_dispatch :: (dispatch_count : int, $procedure : $P, $arguments : ..Code, $mode : CPU_Dispatch_Mode = .CONTIGUOUS_ITEMS) #expand
+{ 
+    ARGUMENT_TYPE_COUNT :: #run type_info(P).argument_types.count;
+    ARGUMENT_TYPES :: #run () -> [ARGUMENT_TYPE_COUNT]Type
+    {
+        types : [ARGUMENT_TYPE_COUNT]Type;
+        for type_info(P).argument_types types[it_index] = get_type(it);
+        return types;
+    }();
+
+    #insert -> string
+    {
+        builder : String_Builder;
+
+        append(*builder, "Packed_Arguments :: struct {");
+        for ARGUMENT_TYPES print(*builder, "argument_%1 : ARGUMENT_TYPES[%1];", it_index);
+        append(*builder, "}\n");
+
+        append(*builder, "packed_arguments := Packed_Arguments.{");
+        for arguments print(*builder, "argument_%1 = #insert arguments[%1],", it_index);
+        append(*builder, "};\n");
+
+        append(*builder, "non_polymorph_procedure :: #procedure_of_call procedure(");
+        for arguments print(*builder, "packed_arguments.argument_%,", it_index);
+        append(*builder, ");\n");
+
+        return builder_to_string(*builder);
+    }
+
+    call_procedure_with_packed_arguments :: ($procedure : $Procedure, packed_arguments : *$Packed_Arguments)
+    {
+        #insert -> string
+        {
+            builder : String_Builder;
+            append(*builder, "procedure(");
+            for 0..ARGUMENT_TYPE_COUNT-1 print(*builder, "packed_arguments.argument_%,", it);
+            append(*builder, ");\n");
+            return builder_to_string(*builder);
+        }
+    }
+
+    internal_procedure :: (dispatch_index : int, pointer_to_arguments : *void) #no_abc
+    {
+        packed_arguments := cast(*Packed_Arguments)pointer_to_arguments;
+        #if mode == .CONTIGUOUS_ITEMS || mode == .PER_THREAD
+        {
+            context.dispatch_index = dispatch_index;
+            call_procedure_with_packed_arguments(procedure, packed_arguments);
+            context.dispatch_index = -1;
+        }
+        else #if mode == .LOAD_BALANCING
+        {
+            while true
+            {
+                context.dispatch_index = atomic_add(*cpu_dispatch_load_balancing_counter, 1);
+                defer context.dispatch_index = -1;
+                if context.dispatch_index >= cpu_dispatch_load_balancing_dispatch_count then break;
+                call_procedure_with_packed_arguments(procedure, packed_arguments);
+            }
+        }
+        else #assert(false);
+    }
+
+    cpu_dispatch_wake_threads_up();
+    defer cpu_dispatch_send_threads_to_sleep();
+    #if mode == .CONTIGUOUS_ITEMS
+    {
+        cpu_dispatch_distributed_internal(dispatch_count, internal_procedure, *packed_arguments);
+    }
+    else #if mode == .LOAD_BALANCING
+    {
+        assert(cpu_dispatch_load_balancing_counter == 0);
+        assert(cpu_dispatch_load_balancing_dispatch_count == 0);
+        cpu_dispatch_load_balancing_counter = 0;
+        cpu_dispatch_load_balancing_dispatch_count = dispatch_count;
+        cpu_dispatch_per_thread_internal(1, internal_procedure, *packed_arguments);
+        assert(cpu_dispatch_load_balancing_counter >= cpu_dispatch_load_balancing_dispatch_count);
+        cpu_dispatch_load_balancing_counter = 0;
+        cpu_dispatch_load_balancing_dispatch_count = 0;
+    }
+    else #if mode == .PER_THREAD
+    {
+        cpu_dispatch_per_thread_internal(dispatch_count, internal_procedure, *packed_arguments);
+    }
+    else
+    {
+        #assert(false);
+    }
+}
+
+
 
 CPU_Dispatch_Mode :: enum
 {
@@ -194,116 +275,6 @@ cpu_dispatch_send_threads_to_sleep :: ()
 
 
 
-cpu_dispatch_internal :: (dispatch_count : int, $procedure : $Procedure, arguments : *$Arguments, $mode : CPU_Dispatch_Mode, $loc : Source_Code_Location)
-{
-    cpu_dispatch_wake_threads_up();
-    defer cpu_dispatch_send_threads_to_sleep();
-
-    #insert #run generate_internal_procedure(Procedure, Arguments, mode, loc);
-    #if mode == .CONTIGUOUS_ITEMS
-    {
-        cpu_dispatch_distributed_internal(dispatch_count, internal_procedure, arguments);
-    }
-    else #if mode == .LOAD_BALANCING
-    {
-        assert(cpu_dispatch_load_balancing_counter == 0);
-        assert(cpu_dispatch_load_balancing_dispatch_count == 0);
-        cpu_dispatch_load_balancing_counter = 0;
-        cpu_dispatch_load_balancing_dispatch_count = dispatch_count;
-        cpu_dispatch_per_thread_internal(1, internal_procedure, arguments);
-        assert(cpu_dispatch_load_balancing_counter >= cpu_dispatch_load_balancing_dispatch_count);
-        cpu_dispatch_load_balancing_counter = 0;
-        cpu_dispatch_load_balancing_dispatch_count = 0;
-    }
-    else #if mode == .PER_THREAD
-    {
-        cpu_dispatch_per_thread_internal(dispatch_count, internal_procedure, arguments);
-    }
-    else
-    {
-        #assert(false);
-    }
-}
-
-
-
-Internal_Procedure :: #type (thread_index : int, parameters : *void);
-cpu_dispatch_load_balancing_counter        : s64 = 0;
-cpu_dispatch_load_balancing_dispatch_count : s64 = 0;
-generate_internal_procedure :: (Procedure_Type : Type, Arguments_Type : Type, mode : CPU_Dispatch_Mode = .CONTIGUOUS_ITEMS, $loc : Source_Code_Location) -> string
-{
-    procedure_info := cast(*Type_Info_Procedure)Procedure_Type;
-    if procedure_info.type != .PROCEDURE
-        compiler_report(tprint("The procedure to dispatch is not a procedure?! It's a %", Procedure_Type), loc);
-    if procedure_info.return_types.count > 0
-        compiler_report(tprint("Procedure % used in CPU Dispatch system cannot return anything!", Procedure_Type), loc);
-
-    arguments_info := cast(*Type_Info_Struct)Arguments_Type;
-    if arguments_info.type != .STRUCT
-        compiler_report(tprint("The arguments type is somehow not a struct?! It's a %", Arguments_Type), loc);
-
-    if procedure_info.argument_types.count != arguments_info.members.count
-        compiler_report(tprint("The procedure takes % members, and the user provided %. These should match", procedure_info.argument_types.count, arguments_info.members.count), loc);
-
-    info_to_name :: (info : *Type_Info) -> string
-    {
-        builder : String_Builder;
-        defer reset(*builder);
-        print_type_to_builder(*builder, info);
-        return builder_to_string(*builder);
-    }
-    for procedure_argument : procedure_info.argument_types
-        if procedure_argument != arguments_info.members[it_index].type
-            compiler_report(tprint("Expected % but argument % it's a %", info_to_name(procedure_argument), it_index, info_to_name(arguments_info.members[it_index].type)), loc);
-
-    // Generate an internal procedure that just wraps the call to the real procedure and 
-    // passes in the arguments. This way we standarize the type of the outer procedure that
-    // each thread will have to call and we don't have to worry about polymorphism outside
-    // of here.
-    builder : String_Builder;
-    defer reset(*builder);
-    p :: (format_string : string, args: ..Any) #expand { print_to_builder(*builder, format_string, ..args); } @PrintLike
-    a :: (the_string : string) #expand { append(*builder, the_string); }
-    generate_procedure_call :: () #expand
-    {
-        a("arguments := cast(*Arguments)pointer_to_arguments;\n");
-        a("procedure(");
-        for procedure_info.argument_types
-        {
-            if it_index == 0 then p("arguments.a%", it_index);
-                             else p(", arguments.a%", it_index);
-        }
-        a(");\n");
-    }
-    p("internal_procedure :: (dispatch_index : int, pointer_to_arguments : *void) #no_abc \n{\n");
-    if mode == .CONTIGUOUS_ITEMS || mode == .PER_THREAD
-    {
-        p("context.dispatch_index = dispatch_index;\n");
-        generate_procedure_call();
-        p("context.dispatch_index = -1;\n");
-    }
-    else if mode == .LOAD_BALANCING
-    {
-        a("while true\n");
-        a("{\n");
-        a("    context.dispatch_index = atomic_add(*cpu_dispatch_load_balancing_counter, 1);\n");
-        a("    defer context.dispatch_index = -1;\n");
-        a("    if context.dispatch_index >= cpu_dispatch_load_balancing_dispatch_count then break;\n");
-        generate_procedure_call();
-        a("}\n");
-    }
-    else
-    {
-        compiler_report(tprint("Somehow we ended up with an incorrect cpu_dispatch mode?? We don't know what % means", mode), loc);
-    }
-    p("}\n\n\n");
-
-    return builder_to_string(*builder);
-
-}
-
-
-
 should_threads_be_running : s32 = 0;
 per_cpu_dispatch_thread : []Per_Thread_Data;
 per_cpu_dispatch_thread_original_memory : *void;
@@ -346,6 +317,10 @@ thread_procedure :: (_thread : *Thread, $on_thread_start : Code, $on_thread_end 
     #insert on_thread_end;
     return 0;
 }
+
+Internal_Procedure :: #type (thread_index : int, parameters : *void);
+cpu_dispatch_load_balancing_counter        : s64 = 0;
+cpu_dispatch_load_balancing_dispatch_count : s64 = 0;
 
 
 
