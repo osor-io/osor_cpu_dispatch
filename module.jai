@@ -71,7 +71,7 @@
 
 
 #add_context dispatch_index : s64 = -1;
-cpu_dispatch :: (dispatch_count : int, $procedure : $P, $arguments : ..Code, $mode : CPU_Dispatch_Mode = .CONTIGUOUS_ITEMS) #expand
+cpu_dispatch :: (dispatch_count : int, $procedure : $P, $arguments : ..Code, $mode : CPU_Dispatch_Mode = .CONTIGUOUS_ITEMS, loc := #caller_location) #expand
 { 
     ARGUMENT_TYPE_COUNT :: #run type_info(P).argument_types.count;
     ARGUMENT_TYPES :: #run () -> [ARGUMENT_TYPE_COUNT]Type
@@ -80,6 +80,14 @@ cpu_dispatch :: (dispatch_count : int, $procedure : $P, $arguments : ..Code, $mo
         for type_info(P).argument_types types[it_index] = get_type(it);
         return types;
     }();
+
+    #run
+    {
+        if arguments.count != ARGUMENT_TYPES.count
+        {
+            compiler_report(tprint("Trying to cpu_dispatch a procedure that takes % arguments but % were provided, the procedure type is %", ARGUMENT_TYPES.count, arguments.count, P), loc);
+        }
+    }
 
     #insert -> string
     {
@@ -90,7 +98,7 @@ cpu_dispatch :: (dispatch_count : int, $procedure : $P, $arguments : ..Code, $mo
         append(*builder, "}\n");
 
         append(*builder, "packed_arguments := Packed_Arguments.{");
-        for arguments print(*builder, "argument_%1 = #insert arguments[%1],", it_index);
+        for arguments print(*builder, "#insert arguments[%1],", it_index);
         append(*builder, "};\n");
 
         append(*builder, "non_polymorph_procedure :: #procedure_of_call procedure(");
@@ -106,7 +114,7 @@ cpu_dispatch :: (dispatch_count : int, $procedure : $P, $arguments : ..Code, $mo
         {
             builder : String_Builder;
             append(*builder, "procedure(");
-            for 0..ARGUMENT_TYPE_COUNT-1 print(*builder, "packed_arguments.argument_%,", it);
+            for 0..ARGUMENT_TYPES.count-1 print(*builder, "packed_arguments.argument_%,", it);
             append(*builder, ");\n");
             return builder_to_string(*builder);
         }

@@ -14,6 +14,7 @@ main :: ()
     defer cpu_dispatch_deinit();
 
     simple_dispatch();
+    dispatch_with_parameters();
     dispatch_once_per_thread();
     continuous_items_mode();
     load_balancing_mode();
@@ -36,6 +37,29 @@ simple_dispatch :: ()
         print("Processing work item number % from thread %\n", context.dispatch_index, context.thread_index);
     }
     cpu_dispatch(20, work);
+}
+
+
+
+dispatch_with_parameters :: ()
+{
+    print_example_name("Dispatch with parameters");
+
+    //
+    // Same as the code above, but our procedure is taking parameters
+    // and adding up to shared variable via a pointer.
+    //
+    work :: (increment : int, counter : *int)
+    {
+        previous := atomic_add(counter, increment);
+        print("[%][%] % -> %\n",
+              formatInt(context.dispatch_index, minimum_digits = 2),
+              formatInt(context.thread_index,   minimum_digits = 2),
+              previous, previous + increment);
+    }
+    counter := 0;
+    cpu_dispatch(20, work, 2, *counter);
+    print("We dispatched 20 work items that all added 2 to a shared counter, the counter value is now %", counter);
 }
 
 
