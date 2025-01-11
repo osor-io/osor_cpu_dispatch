@@ -216,7 +216,7 @@ CPU_Dispatch_Mode :: enum
 cpu_dispatch_init :: (percentage_of_processors_to_use := 0.8,
                       min_threads_to_create           := 4,
                       temporary_storage_for_threads   := 128 * 1024,
-                      base_context_for_threads        : *Context = null,
+                      base_context_for_threads        : *#Context = null,
                       $on_thread_start                : Code = #code {},
                       $on_thread_end                  : Code = #code {})
 {
